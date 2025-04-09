@@ -34,6 +34,43 @@ class LoadTrajectory(Node):
         # send the trajectory
         self.publish_trajectory()
 
+    def distance(x1, y1, x2, y2, x3, y3):
+        '''
+        From: https://stackoverflow.com/a/2233538
+        
+        Returns the shortest distance from a point to a line, 
+        where the line is defined by 2 points (x1, y1) and (x2, y2)
+        and the point is (x3,y3).
+        '''
+        px = x2-x1
+        py = y2-y1
+
+        norm = px**2 + py**2
+
+        u =  ((x3 - x1) * px + (y3 - y1) * py) / float(norm)
+
+        if u > 1:
+            u = 1
+        elif u < 0:
+            u = 0
+
+        x = x1 + u * px
+        y = y1 + u * py
+
+        dx = x - x3
+        dy = y - y3
+
+        # Note: If the actual distance does not matter,
+        # if you only want to compare what this function
+        # returns to other results of this function, you
+        # can just return the squared distance instead
+        # (i.e. remove the sqrt) to gain a little performance
+
+        dist = (dx*dx + dy*dy)**.5
+
+        return dist
+
+
     def publish_trajectory(self):
         print("Publishing trajectory to:", self.pub_topic)
         self.traj_pub.publish(self.trajectory.toPoseArray())
