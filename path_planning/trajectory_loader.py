@@ -3,6 +3,7 @@ import rclpy
 import time
 from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
+import math
 
 from path_planning.utils import LineTrajectory
 
@@ -34,10 +35,10 @@ class LoadTrajectory(Node):
         # send the trajectory
         self.publish_trajectory()
 
-    def distance(x1, y1, x2, y2, x3, y3):
+    def distance(self, x1, y1, x2, y2, x3, y3):
         '''
         From: https://stackoverflow.com/a/2233538
-        
+
         Returns the shortest distance from a point to a line, 
         where the line is defined by 2 points (x1, y1) and (x2, y2)
         and the point is (x3,y3).
@@ -69,6 +70,42 @@ class LoadTrajectory(Node):
         dist = (dx*dx + dy*dy)**.5
 
         return dist
+    
+    def circle_distance(self, circ_center, circ_radius, point1, point2):
+        '''
+        From: https://codereview.stackexchange.com/a/86428
+
+        args:
+            circ_center: size 2 numpy-vector of the form [x,y]^T
+            circ_radius: scalar value
+            point1: Start of line segment
+                    size 2 numpy-vector of the form [x,y]^T
+            point2: End of line segment
+                    size 2 numpy-vector of the form [x,y]^T
+        returns:
+            True if the circle collides with the line segment, False otherwise
+            If True, return the distance, else returns None with False.
+        '''
+        V = point2-point1
+        a=V*V
+        b = 2*V*(point1-circ_center)
+        c = (point1*point1) + (circ_center*circ_center) - (2*point1*circ_center)-(circ_radius**2)
+
+        discriminant = b**2 - 4* a * c
+        if discriminant < 0:
+            # Line is missing circle entirely
+            return False, None
+        
+        sqrt_disc = math.sqrt(discriminant)
+        t1 = (-b + sqrt_disc) / (2 * a)
+        t2 = (-b - sqrt_disc) / (2 * a)
+
+        if not (0 <= t1 <= 1 or 0 <= t2 <= 1):
+            # The line segment misses the circle (but would miss it if extended)
+            return False, None
+        
+        t = max(0, min(1, - b / (2 * a)))
+        return True, point1 + t * V
 
 
     def publish_trajectory(self):
