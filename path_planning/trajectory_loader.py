@@ -35,6 +35,17 @@ class LoadTrajectory(Node):
         # send the trajectory
         self.publish_trajectory()
 
+        # Extra parameters for controller
+        self.min_steering_angle = -math.pi/3 # Need to change to real angle
+        self.max_steering_angle = math.pi/3 # Need to change to real angle
+
+        self.speed_Kp = 0.0 # update
+        self.speed_Ki = 0.0 # update
+        self.command_forward_speed = 1.0 # desired speed, in m/s
+        self.speed_integral = 0.0
+        self.speed_last_time = self.get_clock().now().nanoseconds
+
+
     def distance(self, x1, y1, x2, y2, x3, y3):
         '''
         From: https://stackoverflow.com/a/2233538
@@ -84,7 +95,7 @@ class LoadTrajectory(Node):
                     size 2 numpy-vector of the form [x,y]^T
         returns:
             True if the circle collides with the line segment, False otherwise
-            If True, return the distance, else returns None with False.
+            If True, return the point of intersection, else returns None with False.
         '''
         V = point2-point1
         a=V*V
@@ -106,6 +117,39 @@ class LoadTrajectory(Node):
         
         t = max(0, min(1, - b / (2 * a)))
         return True, point1 + t * V
+    
+    def pure_pursuit_controller(self, current_speed, L, angle_wrt_desired, lfw, Lfw):
+        '''
+        Only works in the forward motion.
+
+        args:
+            current_speed: The velocity that the racecar is currently travelling at, in m/s.
+            L: the length between the rear and front axles, in meters.
+            angle_wrt_desired: angle between direction robot is facing and Lfw, in radians.
+            lfw: The distqance in front of the rear axle where, setting lfw = 0
+                results in the conventional pure-pursuit controller.
+            Lfw: The lookahead distance from lfw to desired point on path.
+        returns:
+            command_steering_angle: steering angle needed to hit point on desired path.
+            command_speed: Speed given using PI controller.
+            
+        '''
+        # Compute angle
+        command_steering_angle = -math.atan((L*math.sin(angle_wrt_desired))/(Lfw/2+lfw*math.cos(angle_wrt_desired)))
+        # Clip to acceptable angle range
+        command_steering_angle = max(self.min_steering_angle, min(self.max_steering_angle, command_steering_angle))
+
+        # PI controller for speed
+        current_time = self.get_clock().now().nanoseconds
+        delta_time = (current_time - self.speed_last_time) * 1e-9
+        self.speed_last_time = current_time
+        
+        speed_error = self.command_forward_speed - current_speed
+        self.speed_integral += delta_time * speed_error
+        command_speed = self.speed_Kp * speed_error + self.speed_Ki * self.speed_integral
+        
+        
+        return command_steering_angle, command_speed
 
 
     def publish_trajectory(self):
