@@ -4,6 +4,8 @@ from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from tf_transformations import euler_from_quaternion
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import PoseArray, Pose
 
 import numpy as np
 import math
@@ -30,9 +32,9 @@ class PurePursuit(Node):
         self.odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
         self.drive_topic = self.get_parameter('drive_topic').get_parameter_value().string_value
 
-        self.lookahead = 0.4  # FILL IN # RADIUS OF CIRCLE
+        self.lookahead = 1.  # FILL IN # RADIUS OF CIRCLE
         self.speed = 1.  # FILL IN #
-        self.wheelbase_length = 0.8  # FILL IN #
+        self.wheelbase_length = 0.33  # FILL IN #
 
         self.trajectory = LineTrajectory("/followed_trajectory")
 
@@ -53,13 +55,35 @@ class PurePursuit(Node):
 
         self.steer_max = pi/4
 
+        self.marker_pub = self.create_publisher(Marker, "/point_marker", 1)
+        self.traj_points_pub = self.create_publisher(PoseArray, "/traj_poses", 1)
+
     # return distance between 2 points
     def distance(self, p, v):
         return np.sqrt(np.sum((p - v)**2))
     
     def eta(self, v1, v2):
-        self.get_logger().info(f"v1 = {v1}, v2 = {v2}")
+        # self.get_logger().info(f"v1 = {v1}, v2 = {v2}")
         return acos(v1.T @ v2 / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+    
+    def draw_marker(self, x, y):
+        """
+        Publish a marker to represent the cone in rviz
+        """
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.type = marker.SPHERE
+        marker.action = marker.ADD
+        marker.scale.x = .2
+        marker.scale.y = .2
+        marker.scale.z = .2
+        marker.color.a = 1.0
+        marker.color.r = 1.0
+        marker.color.g = .5
+        marker.pose.orientation.w = 1.0
+        marker.pose.position.x = x
+        marker.pose.position.y = y
+        self.marker_pub.publish(marker)
     
     # Returns the minimum distance b/t line segment vw and point p
     # where v = np.array(x1,y1), w = np.array(x2,y2)
@@ -119,34 +143,60 @@ class PurePursuit(Node):
             # self.node = node
             # points = self.trajectory.points # TODO: check types
             points = self.points
+
+            # self.get_logger().info(f"NUM POINTS = {len(points)}")
             
             # probably very inefficient
-            distances = np.zeros((len(points), len(points)))
-            for i in range(len(points)):
-                for j in range(len(points)):
-                    if i != j:
-                        v = points[i]
-                        w = points[j]
-                        distances[i,j] = self.min_dist(v, w)
-                    else:
-                        distances[i,j] = 100000
+            # distances = np.zeros((len(points), len(points)))
+            # for i in range(len(points)):
+            #     for j in range(len(points)):
+            #         if i != j:
+            #             v = points[i]
+            #             w = points[j]
+            #             distances[i,j] = self.min_dist(v, w)
+            #         else:
+            #             distances[i,j] = 100000
+            distances = np.zeros(len(points) - 1) # so dist[i] = distance b/t traj pt i and pt i + 1
+            for i in range(len(points) - 1):
+                v = points[i]
+                w = points[i + 1]
+                distances[i] = self.min_dist(v, w)
             
-            min_ind = np.unravel_index(np.argmin(distances, axis=None), distances.shape)
+            # min_ind = np.unravel_index(np.argmin(distances, axis=None), distances.shape)
+            min_ind = np.argmin(distances)
+    
+            # # Closest point on trajectory
+            # p1 = points[min_ind]
+            # self.draw_marker(points[min_ind][0], points[min_ind][1])
 
-            p1 = points[min_ind[0]]
-            p2 = points[min_ind[1]]
+            for i in range(min_ind, len(points) - 1):
+                p1 = points[i]
+                p2 = points[i + 1]
+                found, intersect_pt = self.find_lookahead(p1, p2)
+                if found:
+                    break
 
-            self.get_logger().info(f"CLOSEST PT = ({p1}, {p2})")
+            # p1 = points[min_ind[0]]
+            # p2 = points[min_ind[1]]
 
-            found, intersect_pt = self.find_lookahead(p1, p2)
+            # self.get_logger().info(f"CLOSEST PT = ({p1}, {p2})")
+
+            # found, intersect_pt = self.find_lookahead(p1, p2)
 
             if found:
-                L1 = self.distance(self.robot_pose_arr, intersect_pt)
+                # L1 = self.distance(self.robot_pose_arr, intersect_pt)
+
+                self.draw_marker(intersect_pt[0], intersect_pt[1])
 
                 vel_vect = np.array([self.speed * cos(self.yaw), self.speed * sin(self.yaw)])
 
-                eta = self.eta(vel_vect, intersect_pt)
-                steer = np.clip(atan2(L1, 2 * self.wheelbase_length * sin(eta)), -self.steer_max, self.steer_max)
+                # eta = self.eta(vel_vect, intersect_pt - self.robot_pose_arr)
+                # eta = atan2(vel_vect[1], vel_vect[0]) - atan2(se)
+                yaw_2 = atan2(intersect_pt[1], intersect_pt[0])
+                eta = acos(cos(self.yaw)*cos(yaw_2) - sin(self.yaw) * sin(yaw_2))
+                # steer = np.clip(atan2(2 * self.wheelbase_length * sin(eta), L1), -self.steer_max, self.steer_max)
+
+                steer = np.clip(atan2(2 * self.wheelbase_length * sin(eta), self.lookahead), -self.steer_max, self.steer_max)
                 
                 # create drive command
                 driveCommand = AckermannDriveStamped()
@@ -158,7 +208,7 @@ class PurePursuit(Node):
                 # publish drive command
                 self.drive_pub.publish(driveCommand)
                 
-                # self.get_logger().info(f"v = {steer}")
+                self.get_logger().info(f"v = {steer}")
             else:
                 self.get_logger().info("NOT FOUND")
 
@@ -170,6 +220,40 @@ class PurePursuit(Node):
         self.trajectory.publish_viz(duration=0.0)
 
         self.points = np.array(self.trajectory.points)
+
+        # poses = []
+        # # Initialize pose array to publish particles
+        # particle_msg = PoseArray()
+        # Iterate through particles
+        # for p in self.points:
+
+        #     # Initialize pose message
+        #     pose_i = Pose()
+
+        #     self.get_logger().info(f"p = {p}")
+
+        #     # Set particle position
+        #     pose_i.position.x = p[0]
+        #     pose_i.position.y = p[1]
+        #     pose_i.position.z = 0.
+            
+        #     pose_i.orientation.x = 0.
+        #     pose_i.orientation.y = 0.
+        #     pose_i.orientation.z = 0.
+        #     pose_i.orientation.w = 1.
+
+
+        #     # Append particles to pose array
+        #     poses.append(pose_i)
+        
+        # # Set frame id to map
+        # particle_msg.header.frame_id = "/map"
+
+        # # Set particles poses
+        # particle_msg.poses = poses
+
+        # # Publish particles
+        # self.traj_points_pub.publish(particle_msg)
 
         self.initialized_traj = True
         
