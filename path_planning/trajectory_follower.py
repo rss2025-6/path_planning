@@ -6,6 +6,7 @@ from nav_msgs.msg import Odometry
 from tf_transformations import euler_from_quaternion
 from visualization_msgs.msg import Marker
 from geometry_msgs.msg import PoseArray, Pose
+from std_msgs.msg import Float64
 
 import numpy as np
 import math
@@ -32,7 +33,7 @@ class PurePursuit(Node):
         self.odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
         self.drive_topic = self.get_parameter('drive_topic').get_parameter_value().string_value
 
-        self.lookahead = 0.5  # FILL IN # RADIUS OF CIRCLE
+        self.lookahead = 2.0  # FILL IN # RADIUS OF CIRCLE
         self.speed = 1.  # FILL IN #
         self.wheelbase_length = 0.33  # FILL IN #
 
@@ -50,6 +51,7 @@ class PurePursuit(Node):
                                                  self.odom_topic,
                                                  self.pose_callback,
                                                  1)
+        self.error_pub = self.create_publisher(Float64, "/error", 1)
         
         self.initialized_traj = False
 
@@ -143,6 +145,11 @@ class PurePursuit(Node):
                 distances[i] = self.min_dist(v, w)
             
             min_ind = np.argmin(distances)
+
+            # Publish error
+            error_msg = Float64()
+            error_msg.data = distances[min_ind]
+            self.error_pub.publish(error_msg)
 
             for i in range(min_ind, len(points) - 1):
                 p1 = points[i]
