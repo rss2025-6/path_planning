@@ -2,10 +2,23 @@ import rclpy
 from ackermann_msgs.msg import AckermannDriveStamped
 from geometry_msgs.msg import PoseArray
 from rclpy.node import Node
+from nav_msgs.msg import Odometry
+from tf_transformations import euler_from_quaternion
+from visualization_msgs.msg import Marker
+from geometry_msgs.msg import PoseArray, Pose
+
+import numpy as np
 import math
 
 from .utils import LineTrajectory
 
+sin = np.sin
+cos = np.cos
+
+atan2 = np.arctan2
+acos = np.arccos
+
+pi = np.pi
 
 class PurePursuit(Node):
     """ Implements Pure Pursuit trajectory tracking with a fixed lookahead and speed.
@@ -19,9 +32,9 @@ class PurePursuit(Node):
         self.odom_topic = self.get_parameter('odom_topic').get_parameter_value().string_value
         self.drive_topic = self.get_parameter('drive_topic').get_parameter_value().string_value
 
-        self.lookahead = 0  # FILL IN #
-        self.speed = 0  # FILL IN #
-        self.wheelbase_length = 0  # FILL IN #
+        self.lookahead = 0.5  # FILL IN # RADIUS OF CIRCLE
+        self.speed = 1.  # FILL IN #
+        self.wheelbase_length = 0.33  # FILL IN #
 
         self.trajectory = LineTrajectory("/followed_trajectory")
 
@@ -32,125 +45,134 @@ class PurePursuit(Node):
         self.drive_pub = self.create_publisher(AckermannDriveStamped,
                                                self.drive_topic,
                                                1)
+
+        self.odom_sub = self.create_subscription(Odometry,
+                                                 self.odom_topic,
+                                                 self.pose_callback,
+                                                 1)
         
-        # Extra parameters for controller
-        self.min_steering_angle = -math.pi/3 # Need to change to real angle
-        self.max_steering_angle = math.pi/3 # Need to change to real angle
+        self.initialized_traj = False
 
-        self.speed_Kp = 0.0 # update
-        self.speed_Ki = 0.0 # update
-        self.command_forward_speed = 1.0 # desired speed, in m/s
-        self.speed_integral = 0.0
-        self.speed_last_time = self.get_clock().now().nanoseconds
+        self.steer_max = pi/4
 
+        self.marker_pub = self.create_publisher(Marker, "/point_marker", 1)
+        self.traj_points_pub = self.create_publisher(PoseArray, "/traj_poses", 1)
 
-    def distance(self, x1, y1, x2, y2, x3, y3):
-        '''
-        From: https://stackoverflow.com/a/2233538
-
-        Returns the shortest distance from a point to a line, 
-        where the line is defined by 2 points (x1, y1) and (x2, y2)
-        and the point is (x3,y3).
-        '''
-        px = x2-x1
-        py = y2-y1
-
-        norm = px**2 + py**2
-
-        u =  ((x3 - x1) * px + (y3 - y1) * py) / float(norm)
-
-        if u > 1:
-            u = 1
-        elif u < 0:
-            u = 0
-
-        x = x1 + u * px
-        y = y1 + u * py
-
-        dx = x - x3
-        dy = y - y3
-
-        # Note: If the actual distance does not matter,
-        # if you only want to compare what this function
-        # returns to other results of this function, you
-        # can just return the squared distance instead
-        # (i.e. remove the sqrt) to gain a little performance
-
-        dist = (dx*dx + dy*dy)**.5
-
-        return dist
+    # return distance between 2 points
+    def distance(self, p, v):
+        return np.sqrt(np.sum((p - v)**2))
     
-    def circle_distance(self, circ_center, circ_radius, point1, point2):
-        '''
-        From: https://codereview.stackexchange.com/a/86428
+    def eta(self, v1, v2):
+        # self.get_logger().info(f"v1 = {v1}, v2 = {v2}")
+        return acos(v1.T @ v2 / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+    
+    def draw_marker(self, x, y):
+        """
+        Publish a marker to represent the cone in rviz
+        """
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.type = marker.SPHERE
+        marker.action = marker.ADD
+        marker.scale.x = .2
+        marker.scale.y = .2
+        marker.scale.z = .2
+        marker.color.a = 1.0
+        marker.color.r = 1.0
+        marker.color.g = .5
+        marker.pose.orientation.w = 1.0
+        marker.pose.position.x = x
+        marker.pose.position.y = y
+        self.marker_pub.publish(marker)
+    
+    # Returns the minimum distance b/t line segment vw and point p
+    # where v = np.array(x1,y1), w = np.array(x2,y2)
+    def min_dist(self, v, w):
+        p = self.robot_pose_arr
 
-        args:
-            circ_center: size 2 numpy-vector of the form [x,y]^T
-            circ_radius: scalar value
-            point1: Start of line segment
-                    size 2 numpy-vector of the form [x,y]^T
-            point2: End of line segment
-                    size 2 numpy-vector of the form [x,y]^T
-        returns:
-            True if the circle collides with the line segment, False otherwise
-            If True, return the point of intersection, else returns None with False.
-        '''
-        V = point2-point1
-        a=V*V
-        b = 2*V*(point1-circ_center)
-        c = (point1*point1) + (circ_center*circ_center) - (2*point1*circ_center)-(circ_radius**2)
+        l2 = np.sum((v - w)**2)
 
-        discriminant = b**2 - 4* a * c
-        if discriminant < 0:
-            # Line is missing circle entirely
+        if (l2 == 0.0):
+            return self.distance(p, v)
+        
+        t = max(0, min(1, np.dot(p - v, w - v) / l2))
+        projection = v + t * (w - v)
+
+        return self.distance(p, projection)
+    
+    def find_lookahead(self, p1, p2):
+        Q = self.robot_pose_arr                 # Centre of circle = robot pose
+        r = self.lookahead                  # Radius of circle = radius of robot
+        V = p2 - p1  # Vector along line segment 
+
+        a = V.T@V
+        b = 2 * V.T@(p1 - Q)
+        c = p1.T@p1 + Q.T@Q - 2 * p1.T@Q - r**2
+
+        disc = b**2 - 4 * a * c
+        if disc < 0:
             return False, None
         
-        sqrt_disc = math.sqrt(discriminant)
+        sqrt_disc = math.sqrt(disc)
         t1 = (-b + sqrt_disc) / (2 * a)
         t2 = (-b - sqrt_disc) / (2 * a)
 
         if not (0 <= t1 <= 1 or 0 <= t2 <= 1):
-            # The line segment misses the circle (but would miss it if extended)
             return False, None
         
         t = max(0, min(1, - b / (2 * a)))
-        return True, point1 + t * V
-    
-    def pure_pursuit_controller(self, current_speed, L, angle_wrt_desired, lfw, Lfw):
-        '''
-        Only works in the forward motion.
 
-        args:
-            current_speed: The velocity that the racecar is currently travelling at, in m/s.
-            L: the length between the rear and front axles, in meters.
-            angle_wrt_desired: angle between direction robot is facing and Lfw, in radians.
-            lfw: The distqance in front of the rear axle where, setting lfw = 0
-                results in the conventional pure-pursuit controller.
-            Lfw: The lookahead distance from lfw to desired point on path.
-        returns:
-            command_steering_angle: steering angle needed to hit point on desired path.
-            command_speed: Speed given using PI controller.
+        return True, p1 + t * V
             
-        '''
-        # Compute angle
-        command_steering_angle = -math.atan((L*math.sin(angle_wrt_desired))/(Lfw/2+lfw*math.cos(angle_wrt_desired)))
-        # Clip to acceptable angle range
-        command_steering_angle = max(self.min_steering_angle, min(self.max_steering_angle, command_steering_angle))
-
-        # PI controller for speed
-        current_time = self.get_clock().now().nanoseconds
-        delta_time = (current_time - self.speed_last_time) * 1e-9
-        self.speed_last_time = current_time
-        
-        speed_error = self.command_forward_speed - current_speed
-        self.speed_integral += delta_time * speed_error
-        command_speed = self.speed_Kp * speed_error + self.speed_Ki * self.speed_integral
-        
-        
-        return command_steering_angle, command_speed
-
     def pose_callback(self, odometry_msg):
-        raise NotImplementedError
+
+        self.robot_pose = odometry_msg.pose.pose.position
+        self.robot_orient = odometry_msg.pose.pose.orientation
+
+        self.robot_pose_arr = np.array([self.robot_pose.x, self.robot_pose.y])
+
+        r, p, self.yaw = euler_from_quaternion([self.robot_orient.x, self.robot_orient.y, self.robot_orient.z, self.robot_orient.w])
+
+        if self.initialized_traj:
+            points = self.points
+
+            distances = np.zeros(len(points) - 1) # so dist[i] = distance b/t traj pt i and pt i + 1
+            for i in range(len(points) - 1):
+                v = points[i]
+                w = points[i + 1]
+                distances[i] = self.min_dist(v, w)
+            
+            min_ind = np.argmin(distances)
+
+            for i in range(min_ind, len(points) - 1):
+                p1 = points[i]
+                p2 = points[i + 1]
+                found, intersect_pt = self.find_lookahead(p1, p2)
+                if found:
+                    break
+
+            if found:
+
+                self.draw_marker(intersect_pt[0], intersect_pt[1])
+
+                yaw_2 = atan2(intersect_pt[1] - self.robot_pose_arr[1], intersect_pt[0] - self.robot_pose_arr[0])
+                eta = yaw_2 - self.yaw 
+                
+                steer = atan2(2 * self.wheelbase_length * sin(eta), self.lookahead)
+
+                # create drive command
+                driveCommand = AckermannDriveStamped()
+                driveCommand.header.frame_id = "base_link"
+                driveCommand.header.stamp = self.get_clock().now().to_msg()
+                driveCommand.drive.steering_angle= steer
+                driveCommand.drive.speed= self.speed
+                
+                # publish drive command
+                self.drive_pub.publish(driveCommand)
+                
+                self.get_logger().info(f"steer = {steer}")
+            else:
+                self.get_logger().info("NOT FOUND")
 
     def trajectory_callback(self, msg):
         self.get_logger().info(f"Receiving new trajectory {len(msg.poses)} points")
@@ -159,7 +181,10 @@ class PurePursuit(Node):
         self.trajectory.fromPoseArray(msg)
         self.trajectory.publish_viz(duration=0.0)
 
+        self.points = np.array(self.trajectory.points)
+
         self.initialized_traj = True
+        
 
 
 def main(args=None):
