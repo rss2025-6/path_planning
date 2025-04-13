@@ -36,6 +36,7 @@ class PurePursuit(Node):
         self.lookahead = 2.0  # FILL IN # RADIUS OF CIRCLE
         self.speed = 1.  # FILL IN #
         self.wheelbase_length = 0.33  # FILL IN #
+        self.rear_axle_offset = self.wheelbase_length / 2 # when self.rear_axle_offset = 0.0 then we have standard pure pursuit
 
         self.trajectory = LineTrajectory("/followed_trajectory")
 
@@ -165,7 +166,10 @@ class PurePursuit(Node):
                 yaw_2 = atan2(intersect_pt[1] - self.robot_pose_arr[1], intersect_pt[0] - self.robot_pose_arr[0])
                 eta = yaw_2 - self.yaw 
                 
-                steer = atan2(2 * self.wheelbase_length * sin(eta), self.lookahead)
+                # Standard pure pursuit (w/o self.rear_axle_offset)
+                # steer = atan2(2 * self.wheelbase_length * sin(eta), self.lookahead)
+                # Optimized pure pursuit
+                steer = atan2(self.wheelbase_length * sin(eta), (self.lookahead/2)+(self.rear_axle_offset*cos(eta)))
 
                 # create drive command
                 driveCommand = AckermannDriveStamped()
