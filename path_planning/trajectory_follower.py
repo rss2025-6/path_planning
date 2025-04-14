@@ -39,14 +39,15 @@ class PurePursuit(Node):
         self.rear_axle_offset = self.wheelbase_length / 2 # when self.rear_axle_offset = 0.0 then we have standard pure pursuit
 
         self.steer = 0.0
-        self.steer_max = pi/4
+        self.steer_max = .34
 
         # For calculating lookahead
         self.min_lookahead = self.wheelbase_length/np.tan(self.steer_max)
-        self.max_lookahead = 4 * self.speed
-        
+        self.max_lookahead = 2 * self.speed
+        self.lookahead_factor  = 2.0 # In the range [0,2]
+
         # Distance from the end goal at which the robot is done following the path (i.e. stops moving)
-        self.goal_final_distance_to_end = self.wheelbase_length/2
+        self.goal_final_distance_to_end = self.wheelbase_length
 
         self.trajectory = LineTrajectory("/followed_trajectory")
 
@@ -69,9 +70,9 @@ class PurePursuit(Node):
         self.marker_pub = self.create_publisher(Marker, "/point_marker", 1)
         self.traj_points_pub = self.create_publisher(PoseArray, "/traj_poses", 1)
     
-    def calculate_lookahead(self, distance_to_end):
-        R = self.wheelbase_length/np.tan(self.steer)
-        return max(self.min_lookahead, min(R, self.max_lookahead, distance_to_end))
+    def calculate_lookahead(self, shortest_distance_to_path, distance_to_end):
+        R = self.wheelbase_length/np.tan(self.steer) * self.lookahead_factor
+        return max(self.min_lookahead, shortest_distance_to_path, min(R, self.max_lookahead, distance_to_end))
 
     # return distance between 2 points
     def distance(self, p, v):
@@ -158,8 +159,10 @@ class PurePursuit(Node):
                 distances[i] = self.min_dist(v, w)
             
             min_ind = np.argmin(distances)
+            min_dist_to_path = distances[min_ind]
 
-            distance_to_end = distances[len(distances)-1]
+            end_p = points[len(points)-1]
+            distance_to_end = self.min_dist(end_p, end_p)
 
             # If within self.goal_final_distance_to_end of the end, then stop moving
             if (distance_to_end < self.goal_final_distance_to_end):
@@ -176,7 +179,7 @@ class PurePursuit(Node):
 
             # Publish error
             error_msg = Float64()
-            error_msg.data = distances[min_ind]
+            error_msg.data = min_dist_to_path
             self.error_pub.publish(error_msg)
 
             for i in range(min_ind, len(points) - 1):
@@ -197,9 +200,10 @@ class PurePursuit(Node):
                 # steer = atan2(2 * self.wheelbase_length * sin(eta), self.lookahead)
                 # Optimized pure pursuit
                 self.steer = atan2(self.wheelbase_length * sin(eta), (self.lookahead/2)+(self.rear_axle_offset*cos(eta)))
+                self.steer = max(-self.steer_max, min(self.steer, self.steer_max))
 
                 # Update the lookahead
-                self.lookahead = self.calculate_lookahead(distance_to_end)
+                self.lookahead = self.calculate_lookahead(min_dist_to_path, distance_to_end)
 
                 # create drive command
                 driveCommand = AckermannDriveStamped()
