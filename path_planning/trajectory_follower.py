@@ -38,6 +38,16 @@ class PurePursuit(Node):
         self.wheelbase_length = 0.33  # FILL IN #
         self.rear_axle_offset = self.wheelbase_length / 2 # when self.rear_axle_offset = 0.0 then we have standard pure pursuit
 
+        self.steer = 0.0
+        self.steer_max = pi/4
+
+        # For calculating lookahead
+        self.min_lookahead = self.wheelbase_length/np.tan(self.steer_max)
+        self.max_lookahead = 4 * self.speed
+        
+        # Distance from the end goal at which the robot is done following the path (i.e. stops moving)
+        self.goal_final_distance_to_end = self.wheelbase_length/2
+
         self.trajectory = LineTrajectory("/followed_trajectory")
 
         self.traj_sub = self.create_subscription(PoseArray,
@@ -56,10 +66,12 @@ class PurePursuit(Node):
         
         self.initialized_traj = False
 
-        self.steer_max = pi/4
-
         self.marker_pub = self.create_publisher(Marker, "/point_marker", 1)
         self.traj_points_pub = self.create_publisher(PoseArray, "/traj_poses", 1)
+    
+    def calculate_lookahead(self, distance_to_end):
+        R = self.wheelbase_length/np.tan(self.steer)
+        return max(self.min_lookahead, min(R, self.max_lookahead, distance_to_end))
 
     # return distance between 2 points
     def distance(self, p, v):
@@ -103,7 +115,7 @@ class PurePursuit(Node):
 
         return self.distance(p, projection)
     
-    def find_lookahead(self, p1, p2):
+    def find_lookahead_intersect(self, p1, p2):
         Q = self.robot_pose_arr                 # Centre of circle = robot pose
         r = self.lookahead                  # Radius of circle = radius of robot
         V = p2 - p1  # Vector along line segment 
@@ -147,6 +159,21 @@ class PurePursuit(Node):
             
             min_ind = np.argmin(distances)
 
+            distance_to_end = distances[len(distances)-1]
+
+            # If within self.goal_final_distance_to_end of the end, then stop moving
+            if (distance_to_end < self.goal_final_distance_to_end):
+                # create drive command
+                driveCommand = AckermannDriveStamped()
+                driveCommand.header.frame_id = "base_link"
+                driveCommand.header.stamp = self.get_clock().now().to_msg()
+                driveCommand.drive.steering_angle = 0.0
+                driveCommand.drive.speed = 0.0
+
+                # publish drive command
+                self.drive_pub.publish(driveCommand)
+                return
+
             # Publish error
             error_msg = Float64()
             error_msg.data = distances[min_ind]
@@ -155,7 +182,7 @@ class PurePursuit(Node):
             for i in range(min_ind, len(points) - 1):
                 p1 = points[i]
                 p2 = points[i + 1]
-                found, intersect_pt = self.find_lookahead(p1, p2)
+                found, intersect_pt = self.find_lookahead_intersect(p1, p2)
                 if found:
                     break
 
@@ -169,19 +196,22 @@ class PurePursuit(Node):
                 # Standard pure pursuit (w/o self.rear_axle_offset)
                 # steer = atan2(2 * self.wheelbase_length * sin(eta), self.lookahead)
                 # Optimized pure pursuit
-                steer = atan2(self.wheelbase_length * sin(eta), (self.lookahead/2)+(self.rear_axle_offset*cos(eta)))
+                self.steer = atan2(self.wheelbase_length * sin(eta), (self.lookahead/2)+(self.rear_axle_offset*cos(eta)))
+
+                # Update the lookahead
+                self.lookahead = self.calculate_lookahead(distance_to_end)
 
                 # create drive command
                 driveCommand = AckermannDriveStamped()
                 driveCommand.header.frame_id = "base_link"
                 driveCommand.header.stamp = self.get_clock().now().to_msg()
-                driveCommand.drive.steering_angle= steer
+                driveCommand.drive.steering_angle= self.steer
                 driveCommand.drive.speed= self.speed
                 
                 # publish drive command
                 self.drive_pub.publish(driveCommand)
                 
-                self.get_logger().info(f"steer = {steer}")
+                self.get_logger().info(f"steer = {self.steer}")
             else:
                 self.get_logger().info("NOT FOUND")
 
