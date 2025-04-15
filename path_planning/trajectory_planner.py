@@ -71,10 +71,10 @@ class PathPlan(Node):
         self.goal_cell = None
 
         # Initialize cell size
-        self.cell_size = 20
+        self.cell_size = 5
 
         # Initialize inflation size
-        self.inflation = 10
+        self.inflation = 17
 
         # Initialize graph
         self.edges = {}
@@ -82,7 +82,7 @@ class PathPlan(Node):
         self.occupied_verticies = []
 
         # Flag for plotting
-        self.plot_flag = 1
+        self.plot_flag = 0
 
     # Subscribe to map topic and save data
     def map_cb(self, msg):    

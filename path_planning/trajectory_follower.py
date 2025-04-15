@@ -43,11 +43,11 @@ class PurePursuit(Node):
 
         # For calculating lookahead
         self.min_lookahead = self.wheelbase_length/np.tan(self.steer_max)
-        self.max_lookahead = 2 * self.speed
-        self.lookahead_factor  = 2.0 # In the range [0,2]
+        self.max_lookahead = 3 * self.speed
+        self.lookahead_factor  = 1.0 # In the range [0,2]
 
         # Distance from the end goal at which the robot is done following the path (i.e. stops moving)
-        self.goal_final_distance_to_end = self.wheelbase_length
+        self.goal_final_distance_to_end = 0.5
 
         self.trajectory = LineTrajectory("/followed_trajectory")
 
@@ -72,7 +72,10 @@ class PurePursuit(Node):
     
     def calculate_lookahead(self, shortest_distance_to_path, distance_to_end):
         R = self.wheelbase_length/np.tan(self.steer) * self.lookahead_factor
-        return max(self.min_lookahead, shortest_distance_to_path, min(R, self.max_lookahead, distance_to_end))
+        R = max(self.min_lookahead, shortest_distance_to_path, min(R, self.max_lookahead))
+        if distance_to_end < R:
+            R = distance_to_end*.75
+        return R
 
     # return distance between 2 points
     def distance(self, p, v):
