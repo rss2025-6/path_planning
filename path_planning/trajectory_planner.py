@@ -19,6 +19,20 @@ cos = np.cos
 class PathPlan(Node):
     """ Listens for goal pose published by RViz and uses it to plan a path from
     current car pose.
+
+    To Run On Car:
+        1. teleop
+        2. ros2 launch path_planning real.launch.xml
+        3. ros2 launch racecar_simulator localization_simulate.launch.xml
+
+        Give it an initial pose estimate* and then a goal pose and it should plan a path/move
+            add the path topic in rviz (need to run (3.) first to see it) to see the path
+
+    *Note: it's ready for the pose estimate and goal pose if trajectory-planner prints out 
+    "Map initialized" in the terminal. It will throw an error if pose/goal are initialized
+    but it hasn't received the map
+        If it doesn't grab the map, you just need to kill (3.) and run it again
+
     """
 
     def __init__(self):
@@ -71,10 +85,10 @@ class PathPlan(Node):
         self.goal_cell = None
 
         # Initialize cell size
-        self.cell_size = 20
+        self.cell_size = 2
 
         # Initialize inflation size
-        self.inflation = 10
+        self.inflation = 17
 
         # Initialize graph
         self.edges = {}
@@ -82,13 +96,17 @@ class PathPlan(Node):
         self.occupied_verticies = []
 
         # Flag for plotting
-        self.plot_flag = 1
+        self.plot_flag = 0
 
     # Subscribe to map topic and save data
     def map_cb(self, msg):    
 
         # Convert the map to a numpy array
         self.map = np.array(msg.data)
+
+        # Set unknown as obstacles
+        neg_inds = np.where(self.map == -1)
+        self.map[neg_inds] = 100
         
         # Save map info
         self.map_resolution = msg.info.resolution
@@ -110,6 +128,7 @@ class PathPlan(Node):
         # Print map info
         self.get_logger().info("MAP INITIALIZED")
         self.get_logger().info(f"SHAPE = {np.shape(self.map)}")
+        self.get_logger().info(f"RESOLUTION = {self.map_resolution}")
         self.get_logger().info(f"WIDTH = {self.map_width}")
         self.get_logger().info(f"WIDTH = {self.map_height}")
 
