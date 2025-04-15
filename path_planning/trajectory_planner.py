@@ -11,15 +11,10 @@ from .utils import LineTrajectory
 
 import numpy as np
 import heapq
+import cv2
 
 sin = np.sin
 cos = np.cos
-
-# TODO: CONVERT UV TO XY PROPERLY AND PLOT
-# TODO: TRY DIFFERENT GRID SIZES
-# TODO: CHECK uv VS vu
-# TODO: ANIMATE?
-# TODO: DIALATE MAP
 
 class PathPlan(Node):
     """ Listens for goal pose published by RViz and uses it to plan a path from
@@ -78,9 +73,16 @@ class PathPlan(Node):
         # Initialize cell size
         self.cell_size = 20
 
+        # Initialize inflation size
+        self.inflation = 10
+
         # Initialize graph
         self.edges = {}
         self.verticies = []
+        self.occupied_verticies = []
+
+        # Flag for plotting
+        self.plot_flag = 1
 
     # Subscribe to map topic and save data
     def map_cb(self, msg):    
@@ -123,7 +125,6 @@ class PathPlan(Node):
 
         return uv - uv%self.cell_size
 
-    # TODO: HOW TO APPLY ROTATION
     def uv_2_xy(self, pose):
 
         path_xy = pose[:]
@@ -163,7 +164,7 @@ class PathPlan(Node):
         for v in self.verticies:
 
             # Plot each vertex
-            ax.scatter(v[1], v[0], color='gray', marker='o', s=3)
+            ax.scatter(v[1], v[0], color='dodgerblue', marker='o', s=3)
 
             # Get neighbors
             all_neigh = self.edges.get(tuple(v), [])
@@ -172,26 +173,24 @@ class PathPlan(Node):
             for neigh, _ in all_neigh:
                 x1, y1 = v
                 x2, y2 = neigh
-                ax.plot([y1, y2], [x1, x2], color='lightgray', lw=1)
+                ax.plot([y1, y2], [x1, x2], color='dodgerblue', lw=1)
 
-        # Plot the path
-        # path = np.array(path)
+        ax.plot(path[:, 1], path[:, 0], color='black', lw = 1)
 
-        ax.plot(path[:, 1], path[:, 0], color='red', lw = 1)
-
-        ax.scatter(path[0,1], path[0, 0], color='red', marker='*', s=30, zorder=5)
+        ax.scatter(path[0,1], path[0, 0], color='black', marker='*', s=30, zorder=5)
         ax.scatter(path[-1,1], path[-1, 0], color='green', marker='*', s=30, zorder=5)
 
         ax.set_aspect('equal')
 
         # plt.show()
         plt.savefig("plots/path")
+        self.get_logger().info("PLOT SAVED TO plots/path")
     
     # Given a start point and end point, finds a path through the graph
     def a_star(self, start_point, end_point):
 
-        unexplored = []
-        heapq.heappush(unexplored, (0, start_point))  # (cost, point)
+        unexploblack = []
+        heapq.heappush(unexploblack, (0, start_point))  # (cost, point)
         
         # Costs to each node
         g_n = {tuple(start_point): 0}
@@ -202,11 +201,11 @@ class PathPlan(Node):
         # Store parents to find full path
         parents = {}
         
-        # While we haven't explored the whole graph
-        while unexplored:
+        # While we haven't exploblack the whole graph
+        while unexploblack:
 
             # Get the node with the lowest cost
-            current_f, current_node = heapq.heappop(unexplored)
+            current_f, current_node = heapq.heappop(unexploblack)
             
             # Check if goal reached
             if np.array_equal(current_node, end_point):
@@ -229,7 +228,9 @@ class PathPlan(Node):
                 path = np.array(path)
                 
                 # Plot the path
-                # self.plot_path(path)
+                if self.plot_flag:
+                    self.plot_path(path)
+
                 return path
             
             # Iterate through neighbors
@@ -246,69 +247,64 @@ class PathPlan(Node):
                     f_n[tuple(neigh)] = g_neigh + np.linalg.norm(neigh - end_point)
 
                     # Add to heap
-                    heapq.heappush(unexplored, (f_n[tuple(neigh)], neigh))
+                    heapq.heappush(unexploblack, (f_n[tuple(neigh)], neigh))
 
                     # Set parent
                     parents[tuple(neigh)] = current_node
         
         return None
     
-    # Plot just the graph (for debugging)
+    # Plot just the graph
     def plot_graph(self):
         fig, ax = plt.subplots(figsize=(8,6))
 
         for v in self.verticies:
-            ax.scatter(v[1], v[0], color='gray', marker='o', s=3)
+            ax.scatter(v[1], v[0], color='dodgerblue', marker='o', s=3)
 
             all_neigh = self.edges.get(tuple(v), [])
             for neigh, _ in all_neigh:
                 x1, y1 = v
                 x2, y2 = neigh
-                ax.plot([y1, y2], [x1, x2], color='lightgray', lw=1)
+                ax.plot([y1, y2], [x1, x2], color='dodgerblue', lw=1)
         
         ax.scatter(self.robot_cell[0], self.robot_cell[1], color='green', marker='o', s=5, zorder=5)
         ax.scatter(self.goal_cell[0], self.goal_cell[1], color='green', marker='o', s=5, zorder=5)
 
         ax.set_aspect('equal')
 
-        # plt.show()
         plt.savefig("plots/graph")
+        self.get_logger().info("PLOT SAVED TO plots/graph")
 
-
+    # Plot in xy space
     def plot_xy(self, path):
         fig, ax = plt.subplots(figsize=(8,6))
 
         for v in self.verticies:
-            # # ATTEMPT 1
-            # v_xy =  self.uv_2_xy(np.array(v))
-            # # ax.scatter(v[1], v[0], color='gray', marker='o', s=3)
-            # ax.scatter(v_xy[0], v_xy[1], color = 'gray', marker = 'o', s=3)
-
-            # ATTEMPT 2
-            arr = np.array([v[1], v[0]])
+            arr = np.array([[v[0], v[1]]])
             arr = arr.astype(np.float64)
             v_xy = self.uv_2_xy(arr)
-            # ax.scatter(v[1], v[0], color='gray', marker='o', s=3)
-            ax.scatter(v_xy[0], v_xy[1], color = 'gray', marker = 'o', s=3)
+            ax.scatter(v_xy[0,0], v_xy[0,1], color = 'dodgerblue', marker = 'o', s=3)
 
-            # all_neigh = self.edges.get(tuple(v), [])
-            # for neigh, _ in all_neigh:
-            #     x1, y1 = v
-            #     x2, y2 = neigh
-            #     ax.plot([y1, y2], [x1, x2], color='lightgray', lw=1)
-        
-        # ax.scatter(self.robot_cell[0], self.robot_cell[1], color='green', marker='o', s=5, zorder=5)
-        # ax.scatter(self.goal_cell[0], self.goal_cell[1], color='green', marker='o', s=5, zorder=5)
+            all_neigh = self.edges.get(tuple(v), [])
+            for neigh, _ in all_neigh:
+                x1, y1 = v_xy[0]
 
-        ax.plot(path[:, 1], path[:, 0], color='red', lw = 1)
+                arr = np.array([[neigh[0], neigh[1]]])
+                arr = arr.astype(np.float64)
+                neigh_xy = self.uv_2_xy(arr)
+                x2, y2 = neigh_xy[0]
+                ax.plot([x1, x2], [y1, y2], color='dodgerblue', lw=1)
 
-        ax.scatter(path[0,1], path[0, 0], color='red', marker='*', s=30, zorder=5)
-        ax.scatter(path[-1,1], path[-1, 0], color='green', marker='*', s=30, zorder=5)
+        ax.plot(path[:, 0], path[:, 1], color='black', lw = 1)
+
+        ax.scatter(path[0,0], path[0, 1], color='black', marker='*', s=30, zorder=5)
+        ax.scatter(path[-1,0], path[-1, 1], color='green', marker='*', s=30, zorder=5)
 
         ax.set_aspect('equal')
 
         # plt.show()
         plt.savefig("plots/graph_xy")
+        self.get_logger().info("PLOT SAVED TO plots/graph_xy")
 
     # Add edges to the graph like {node: [(neighbor), weight]}
     # Adds edge both from node 1 to node 2 and from node 2 to node 1
@@ -326,8 +322,6 @@ class PathPlan(Node):
     # record edges and verticies in the map
     def map_2_graph(self):
 
-        # for i in range(self.map_height):
-        #     for j in range(self.map_width):
         for i in np.arange(0, self.map_height, self.cell_size):
             for j in np.arange(0, self.map_width, self.cell_size):
 
@@ -355,34 +349,75 @@ class PathPlan(Node):
                         # if upper right diagonal is not an obs, add edge
                         if j < self.map_width - self.cell_size and 0 <= self.map[i + self.cell_size, j+self.cell_size] < 10:
                             self.add_edge(node, (i + self.cell_size, j+self.cell_size), self.cell_size * 2**0.5)
+        
+        if self.plot_flag:
+            for i in range(self.map_height):
+                for j in range(self.map_width):
+                    if self.map[i, j] >= 10:
+                        self.occupied_verticies.append([i, j])
+
+    # Inflates obstacles by self.inflation
+    def dilate_map(self):
+        # Create kernel for inflation
+        kernel = np.ones((self.inflation, self.inflation), np.uint8)
+
+        # Inflate the map
+        self.map = cv2.dilate(self.map.astype(np.uint8), kernel, iterations=1)
+
+    # Plot occupied spaces
+    def plot_plain_map(self):
+        fig, ax = plt.subplots(figsize=(8,6))
+
+        self.occupied_verticies = np.array(self.occupied_verticies)
+        ax.scatter(self.occupied_verticies[:, 1], self.occupied_verticies[:, 0], color = "black", marker = 'o', s=1)
+
+        ax.set_aspect("equal")
+
+        plt.savefig("plots/map_outline")
+        self.get_logger().info("PLOT SAVED TO plots/map_outline")
+
 
     def plan_path(self, start_point, end_point, map):
 
+        # Inflate the obstacles to plan farther from wall
+        self.get_logger().info("Dilating Map")
+        self.dilate_map()
+
+        # Convert the map to a graph
         self.get_logger().info("CONVERTING TO GRAPH")
         self.map_2_graph()
 
-        # self.get_logger().info("PLOTTING GRAPH")
-        # self.plot_graph()
-        # self.get_logger().info("DONE PLOTTING")
+        # Plot if we are plotting
+        if self.plot_flag:
+            # Plot the plain map
+            self.get_logger().info("PLOTTING Plain MAP...")
+            self.plot_plain_map()
 
+            # Plot the graph representation of the map
+            self.get_logger().info("PLOTTING GRAPH")
+            self.plot_graph()
+            self.get_logger().info("DONE PLOTTING")
+
+        # Run A* to plan a path from start to end point
         self.get_logger().info("RUNNING A*")
-
-        self.get_logger().info(f"START = {start_point}")
-
-        # self.get_logger().info(f"{type(self.verticies[0][0])}")
         path_uv = self.a_star(np.array([np.int64(start_point[1]), np.int64(start_point[0])]), np.array([np.int64(end_point[1]), np.int64(end_point[0])])) # TODO: I think inidicies should be swapped but this may be error
         self.get_logger().info("A* DONE!!!")
 
+        # Convert uv space to xy space
         path_xy = self.uv_2_xy(path_uv.astype(np.float64))
 
         # Add in actual start and goal
         path_xy = np.vstack((self.robot_pose, path_xy[1:,:]))
         path_xy = np.vstack((path_xy[:-1,:], self.goal_coords))
 
-        # self.get_logger().info("PLOTTING XY")
-        # self.plot_xy(path_xy)
-        # self.get_logger().info("DONE PLOTTING")
+        # Plot if we are plotting
+        if self.plot_flag:
+            # Plot path and graph in xy space
+            self.get_logger().info("PLOTTING XY")
+            self.plot_xy(path_xy)
+            self.get_logger().info("DONE PLOTTING")
 
+        # Publish the trajectory
         self.trajectory.points = path_xy
         
         self.traj_pub.publish(self.trajectory.toPoseArray())
