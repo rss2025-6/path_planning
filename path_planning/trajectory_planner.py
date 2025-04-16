@@ -4,21 +4,14 @@ from rclpy.node import Node
 assert rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, PoseArray
 from nav_msgs.msg import OccupancyGrid
-from tf_transformations import euler_from_quaternion, quaternion_from_euler
-from std_msgs.msg import Float32
+from tf_transformations import euler_from_quaternion
+import matplotlib.pyplot as plt
 import numpy as np
 from .utils import LineTrajectory
+sin = np.sin
+cos = np.cos
 
-class TreeNode:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.parent = None
-        self.cost = 0
-class Graph:
-    def __init__(self, vertices, edges):
-        self.vertices = vertices
-        self.edges = edges
+
 class PathPlan(Node):
     """ Listens for goal pose published by RViz and uses it to plan a path from
     current car pose.
@@ -62,124 +55,229 @@ class PathPlan(Node):
 
         self.trajectory = LineTrajectory(node=self, viz_namespace="/planned_trajectory")
 
-        ###Start RRT###
-        self.map_graph = None
+
+        ### RRT variables ###
+        self.map = None
         self.map_resolution = None
         self.map_width = None
         self.map_height = None
-        self.root_position = None
-        self.goal_position = None
-        self.tolerance = 1.0
-        self.tree = None
+        self.map_origin = None
+        self.map_yaw = None
 
+        self.cell_size = 5
+
+        self.robot_pose = None
+        self.robot_cell = None
+        self.goal_cell = None
+
+        self.map_nodes = []
+        self.map_edges = {}
+
+        #####################
     def map_cb(self, msg):
-        # create a graph of valid positions from map
-        self.get_logger().info(f"Received map: {msg.info.width}x{msg.info.height} resolution: {msg.info.resolution}")
+
+        # Convert the map to a numpy array
+        self.map = np.array(msg.data)
+        
+        # Save map info
+        self.map_resolution = msg.info.resolution
         self.map_width = msg.info.width
         self.map_height = msg.info.height
-        self.map_resolution = msg.info.resolution
-        cells = msg.data
-        self.map_graph = self.create_graph(self, self.map_width, self.map_height, cells, self.map_resolution)
-        
-    # Proceed with your logic
 
+        # Save map origin
+        self.map_origin = msg.info.origin
+
+        x = self.map_origin.orientation.x
+        y = self.map_origin.orientation.y
+        z = self.map_origin.orientation.z
+        w = self.map_origin.orientation.w
+        r, p, self.map_yaw = euler_from_quaternion([x, y, z, w])
+
+        # Reshape 1D map to 2D
+        self.map = np.reshape(self.map, (self.map_height, self.map_width))
+
+        # Print map info
+        self.get_logger().info("MAP INITIALIZED")
+        self.get_logger().info(f"SHAPE = {np.shape(self.map)}")
+        self.get_logger().info(f"WIDTH = {self.map_width}")
+        self.get_logger().info(f"WIDTH = {self.map_height}")
 
     def pose_cb(self, pose):
-        # get robot pose
-        self.current_x = pose.pose.position.x
-        self.current_y = pose.pose.position.y
-        self.current_orient = pose.pose.orientation
-        x = self.current_orient.x
-        y = self.current_orient.y
-        z = self.current_orient.z
-        w = self.current_orient.w
-        r, p, self.true_yaw = euler_from_quaternion([x, y, z, w])
-        self.root_position = TreeNode(self.current_x, self.current_y)
+        self.robot_pose = np.array([pose.pose.pose.position.x, pose.pose.pose.position.y]) 
+        # self.get_logger().info(f"POSITION SET AT {self.robot_pose}")
+        self.robot_cell = self.xy_2_uv(np.array([pose.pose.pose.position.x, pose.pose.pose.position.y]))
 
     def goal_cb(self, msg):
-        # get goal pose
-        self.goal_x = msg.pose.position.x
-        self.goal_y = msg.pose.position.y
-        self.goal_position = TreeNode(self.goal_x, self.goal_y)
+        self.goal_coords = np.array([msg.pose.position.x, msg.pose.position.y])
+        self.goal_cell = self.xy_2_uv(np.array([msg.pose.position.x, msg.pose.position.y]))
+        self.get_logger().info("GOAL SET")
+        start = (self.robot_cell[0], self.robot_cell[1])
+        end = (self.goal_cell[0], self.goal_cell[1])
+        self.plan_path(start, end, self.map)
 
     def plan_path(self, start_point, end_point, map):
-        path = self.rrt(start_point, end_point, map)
-        for node in path:
-            self.trajectory.addPoint((node.x, node.y))
-        # msg = PoseArray()
+        # Convert the map to a graph
+        self.get_logger().info("CONVERTING TO GRAPH")
+        self.map_2_graph()
+        # self.get_logger().info("PLOTTING GRAPH")
+        # self.plot_graph()
+        self.get_logger().info("RUNNING RRT")
+        path_uv = self.rrt(start_point, end_point) # TODO: I think inidicies should be swapped but this may be error
+        self.get_logger().info("RRT DONE!!!")
+        self.get_logger().info(f"PATH: {path_uv}")
+        # path_xy = self.uv_2_xy(path_uv.astype(np.float64))
+
+        # Add in actual start and goal
+        path_uv_array = np.array(path_uv)
+
+        # Ensure the array is of type float64
+        path_uv_array = path_uv_array.astype(np.float64)
+
+        # Now you can pass the array to uv_2_xy
+        path_xy = self.uv_2_xy(path_uv_array)
+        path_xy = np.vstack((self.robot_pose, path_xy[1:,:]))
+        path_xy = np.vstack((path_xy[:-1,:], self.goal_coords))
+
+        self.trajectory.points = path_xy
+
         self.traj_pub.publish(self.trajectory.toPoseArray())
         self.trajectory.publish_viz()
 
-    ### RRT Helper Functions ###
-    def rrt(self, start, goal, map):
-        tree = [start]
-        while self.goal_condition(tree[-1], self.tolerance) is False:
-            random_node = self.sample(map)
-            nearest_node = self.get_nearest_node(random_node,tree)
-            random_node.parent = nearest_node
-            tree.append(random_node)
+    ### RRT Functions ###
+    def rrt(self, start_node, goal_node): # run rrt in uv coords
+        tree_nodes = [start_node]
+        tree_edges = {}
+        max_iterations = 1000  # Add a limit to prevent an infinite loop
+        iterations = 0
+        arrived = False
 
-        last_node = tree[-1]
-        current_node = last_node
-        path = [current_node]
+        while not arrived:
+            iterations += 1
+            random_node = self.sample()
+            self.get_logger().info(f'Iteration {iterations}: Random Node: {random_node}')
+            
+            nearest_node = self.nearest(random_node, tree_nodes)
+            self.get_logger().info(f'Nearest Node: {nearest_node}')
+            
+            new_node = self.steer(nearest_node, random_node)
+            self.get_logger().info(f'New Node: {new_node}')
+            
+            if new_node != nearest_node:
+                tree_nodes.append(new_node)
+                self.add_edge(nearest_node, new_node, tree_edges)
+            
+            # Check if we've reached the goal
+            distance_to_goal = np.linalg.norm(np.array(new_node) - np.array(goal_node))
+            self.get_logger().info(f"Distance to Goal: {distance_to_goal}")
 
-        while current_node.parent is not None:
-            parent = current_node.parent
-            path.append(parent)
-            current_node = parent
+            if distance_to_goal < 400:  # Adjust the tolerance based on your requirements
+                arrived = True
 
+        return self.build_path(tree_nodes, tree_edges)
+
+    
+
+    
+    def goal_condition(self, current_node, goal_node, tolerance = 5): # checks if current node is within a certain tolerance
+        self.get_logger().info(f'dist: {np.linalg.norm(np.array(current_node) - np.array(goal_node))}')
+        return np.linalg.norm(np.array(current_node) - np.array(goal_node)) < tolerance    
+    def build_path(self, nodes, edges):
+        self.get_logger().info(f"NODE: {len(nodes)}")
+        path = [nodes[-1]]  # Start with the goal node
+        current_node = nodes[-1]
+        while current_node != nodes[0]:
+            for neighbor in edges[current_node]:
+                if neighbor not in path:  # Avoid cycles
+                    path.insert(0, neighbor)
+                    current_node = neighbor
+                    break
         return path
-    
-    def sample(self, map):
-        random_node = np.random.choice(map.vertices, 1)
-        x = random_node[0] * self.map_resolution
-        y = random_node[1] * self.map_resolution
-        return TreeNode(x,y)
-        # return random_node
+
+    def steer(self, from_node, to_node):
+        theta = np.arctan2(to_node[1] - from_node[1], to_node[0] - from_node[0])
+        
+        new_node = (from_node[0] + 5 * cos(theta),
+                    from_node[1] + 5 * sin(theta))
+        
+        new_node_grid = (round(new_node[0] / self.cell_size) * self.cell_size,
+                        round(new_node[1] / self.cell_size) * self.cell_size)
+        
+        if self.is_free(new_node_grid):
+            return new_node_grid  # Return the new node if it's free
+        else:
+            return from_node  # If not free, return the original node (no movement)
 
     
-    def get_nearest_node(self, new_node, tree):
+    def is_free(self, node): # see if node is a free space, -1 --> occupied, 0 --> unoccupied, might be redundant since map_graph only has 
+            return node in self.map_nodes
+    def sample(self): # choose a random sample from the graph
+        index = np.random.choice(range(0,len(self.map_nodes)))
+        sample = self.map_nodes[index]
+        return sample
+    def nearest(self, random_node, tree_nodes): # find nearest node that exists in the current tree; note tree should start with initial position of robot
         min_node = None
         min_dist = np.inf
-        for node in tree:
-            dist = np.linalg.norm([node.x-new_node.x, node.y-new_node.y])
+        for node in tree_nodes:
+            dist = np.linalg.norm([node[0] - random_node[0], node[1] - random_node[1]])
             if dist < min_dist:
                 min_node = node
                 min_dist = dist
-       
         return min_node
-    
-    def create_graph(self, width, height, cells, map_resolution): # might need to add parents?
-        # graph = {}
-        vertices = set()
-        edges = set()
-        for r in range(height):
-            for c in range(width):
-                index = r*height + c
-                # x = map_resolution * r
-                # y = map_resolution * c
-                probability = cells[index]
-                # i f 0 < probability < 50: # might need to adjust, only want accessible positions in graph
-                if 0 < probability < 50:
-                    vertices.add((r,c))
-                    adj = {(r+i, c+j) for i in (-1,0,1) for j in (-1,0,1) if 0<=r+i<height and 0<=c+j<width and 0<cells[(r+i)*height +(c+j)]<50}
-                    edges.update(adj)
-                # valid_node = TreeNode(x, y)
-                # valid_node.cost = probability # may help with choosing points later by leaning towards more probabaly open spots
-                # graph.append(valid_node)
-        return Graph(vertices, edges)
-    
-    def goal_condition(self, current_node, tolerance): # ✅
-        # check if current node is within acceptable tolerance position of goal
-        x = current_node.x
-        y = current_node.y
-        goal_x = self.goal_position.x
-        goal_y = self.goal_position.y
-        return np.linalg.norm([x-goal_x, y-goal_y]) < tolerance
+    def map_2_graph(self):
+        for i in np.arange(0, self.map_height, self.cell_size):
+            for j in np.arange(0, self.map_width, self.cell_size):
+                node = (i, j)
+                # if i, j isn't an obstacle
+                if 0 <= self.map[i, j] < 10:
+                    self.map_nodes.append(node)
 
+                    # if the cell to the right isn't an obstacle, add an edge
+                    if j < self.map_width - self.cell_size and 0 <= self.map[i,j+self.cell_size] < 10:
+                        self.add_edge(node, (i,j+self.cell_size), self.map_edges)
 
-    ### End RRT Helper Functions
-        
+                    # if the cell above isn't and obstalce, add an edge
+                    if i < self.map_height - self.cell_size and 0 <= self.map[i + self.cell_size, j] < 10:
+                        self.add_edge(node, (i + self.cell_size, j), self.map_edges)
+                    
+                    if i < self.map_height - self.cell_size:
+                        
+                        # if upper left diagonal is not an obs, add edge
+                        if j > 0 and 0 <= self.map[i + self.cell_size, j-self.cell_size] < 10:
+                            self.add_edge(node, (i + self.cell_size, j-self.cell_size), self.map_edges)
+
+                        # if upper right diagonal is not an obs, add edge
+                        if j < self.map_width - self.cell_size and 0 <= self.map[i + self.cell_size, j+self.cell_size] < 10:
+                            self.add_edge(node, (i + self.cell_size, j+self.cell_size), self.map_edges)
+    def uv_2_xy(self, pose):
+        path_xy = pose[:]
+        path_xy *= self.map_resolution
+        path_xy = path_xy @ np.linalg.inv(np.array([[cos(self.map_yaw), -sin(self.map_yaw)], [sin(self.map_yaw), cos(self.map_yaw)]]))
+        path_xy += np.array([self.map_origin.position.y, self.map_origin.position.x])
+        y = np.array([path_xy[:, 0]])
+        x = np.array([path_xy[:, 1]])
+        path_xy = np.hstack((x.T, y.T))
+        return path_xy
+    def xy_2_uv(self, pose):
+        uv = pose[:]
+        uv -= np.array([self.map_origin.position.x, self.map_origin.position.y])
+        R = np.array([[cos(self.map_yaw), -sin(self.map_yaw)], [sin(self.map_yaw), cos(self.map_yaw)]])
+        uv = np.dot(R, uv)
+        uv /= self.map_resolution
+
+        self.get_logger().info(f"POSE = {uv}")
+        self.get_logger().info(f"POSE ADJ = {uv - uv%self.cell_size}")
+
+        return uv - uv%self.cell_size
+    def add_edge(self, from_node, to_node, edges): # add bidirectional edge to edge dictionary
+        if from_node not in edges:
+            edges[from_node] = [from_node]
+        else:
+            edges[from_node].append(to_node)
+        if to_node not in edges:
+            edges[to_node] = [from_node]
+        else:
+            edges[to_node].append(from_node)
+
 
 def main(args=None):
     rclpy.init(args=args)
